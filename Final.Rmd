@@ -1,0 +1,344 @@
+---
+title: "Analysis of Boston Rent Prices"
+author: "William Dean"
+output: pdf_document
+header-includes: 
+- \usepackage{graphicx}
+- \usepackage{float}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, 
+                      fig.align = 'center', out.width = '75%', 
+                      kable.force.latex = TRUE, 
+                      fig.pos = 'H')
+library(tidyverse)
+library(lme4)
+library(splines)
+library(gridExtra)
+library(knitr)
+```
+
+# Introduction
+
+Boston is known for its high housing prices. However, these costs vary greatly upon the property location within the city. Throughout Boston, different places provide different sets of amenities as well as the proximity to various places of interest that make certain areas more desirable to live than others. Also, desirability of certain housing styles throughout the city can impact the price of rentals. Overall, when looking at rental prices in Boston, there is a delicate balance between the access the location provides and its affordability. The aim of this project is to investigate the the direct impact amenities have on the price to rent a room in Boston.
+
+# Data 
+
+```{r}
+load('data/boston.Rda')
+load('tidydata/data.Rda')
+data$rooms2 <- (data$rooms * attr(data$rooms, 'scaled:scale') + attr(data$rooms, 'scaled:center')) %>% as.numeric()
+# no axis for ggplot maps
+no_axis <- theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), 
+        axis.title.y = element_blank(), 
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+```
+
+
+## Data Collection
+
+The website [PadMapper](https://www.padmapper.com) provides information about rent through the city. Along with this rent information, the number of rooms being rented was provided. This gives users the ability to look at the price of rent per rooms. [Google's Places API](https://developers.google.com/places/documentation/) provides information regarding shopping, dinner, grocery, entertainment, transportation options, nightlife, and what other amenities that are available in an area of a city. Information regarding parks and outdoor resources can be found on [Boston's city website](https://data.boston.gov).
+
+## Data Description
+
+After aggregating the data about the listings from the sources and extracting characteristics, each room listings had the following attributes:
+
+Variables to capture the proximity of local amenities. Namely, the closest distance in miles to all of the following: T stop, bar, grocery store, coffee shop, restaurant, historical site, landmark, bike path, dog park, and park. These variables describe the local transportation, food, leisure, and entertainment and give insight to how accessible they are for that area.
+
+Some variables reflecting where the listing is in the city. These include an indicator if the listing is within a half mile of a sports arena, another indicator if downtown, and one if the listing is within a half mile of the Boston Common. Similarly, the neighborhood of the city is attached to each listing and the distance in miles to the Boston Common. 
+
+There are two variables to capture the characteristics of the listings and other listings within the area. They are the average number of rooms of the closest 10 other apartments which tell what living situations in the area is like as well as an indicator if the listing is a studio apartment.
+
+With each listings, the average traffic count of the closest 3 intersections was recorded in order to describe how busy the location is.
+
+The variable of interest to estimate is the rent, however the $\log(\text{Rent})$ for the listing provides a better comparison with the right skewness of rent prices. Figure 1 shows the location of the data points throughout the city of Boston and the $\log(\text{Rent})$ price of that data point.
+
+```{r, fig.cap='Price of rent per room throughout Boston (Log Scale)'}
+boston + geom_point(data = data, aes(longitude, latitude, color = log(rent))) + no_axis + labs(color = 'Log(Rent)')
+```
+ 
+# A Need for GLM
+ 
+Even if you are not familiar with Boston, it is probably apparent that the rent prices are going vary, not only throughout the city, but throughout the neighborhoods in the city. It's also likely to believe how much they vary will depend upon where they are and what amenities the area provides.
+
+For instance, Figure 2 shows that not only does the average rent change between neighborhoods but how much that rent varies also depends upon the neighborhood. Areas like Allston have many types of living situations ranging from family homes to new luxury apartments which increase the variability of a room's price throughout the neighborhood. On the other hand, some areas provide fairly uniform living arrangements. For example, a downtown neighborhood like Chinatown has very similar apartment/loft style living or a very residential area like Roslindale may only have family homes which would affect the variability of the rent prices. Although a crude example, the dispersion of the data is likely to also depend upon the covariates of interest. 
+ 
+```{r, fig.width=4, fig.height=3, fig.cap='An early indication that the dispersion of the data may depend upon the covariates'}
+rows <- data$neighbourhood_cleansed %in% c('Allston', 'Roslindale', 
+                                           'Chinatown')
+data[rows, ] %>% 
+ggplot(aes(neighbourhood_cleansed, log(rent))) + 
+  geom_boxplot() + 
+  coord_flip() + 
+  labs(y = 'Log(Rent)', x = '')
+```
+
+That being said, instead of just modeling the rent on the covariates, modeling both the mean and dispersion will likely capture the variation of the data. Using a GLM to jointly model the mean and dispersion will allow for the model such a scenario. That is, after modeling the mean of the $\log(\text{Rent})$ with a linear model and the dispersion of data with a gamma model, a new model will take in account both the covariate's effect on the mean and dispersion and will better reflect the data.
+
+
+# EDA
+
+Investigating the relationship the covariates have with the outcome, many appear to have the same relationship with the rent regardless of the location of the listing. For instance, Figure 6 in the appendix shows how as the average number of rooms of closest listings increases on the log scale, the rent per room also decreases on the log scale. Not only does it decreases, but it generally decreases for all neighborhoods. This appears to be the case for these two variables as well as other relationships. Neighborhood appears to have no effect on the trend of the relationship. For many other relationships, the location does not change the effect of the covariate. 
+
+In comparison, the effect that some of the covariates appear to vary depending on the neighborhood. Consider Figure 3 where the relationship the log of distance to closest grocery store has with the rent changes. The rent on the log scale in Charlestown appears to decrease linearly as the closest to a grocery store increases, however in Jamaica Plain the relationship between these two variables appears a little different and moves in the opposite direction. The appendix shows a similar neighborhood effect with the variable for closeness to bicycle paths. There appears to exist interactions between some of the variables and the neighborhood of the listings. 
+
+```{r, fig.cap='Neighborhood Effect Among Covariates'}
+rows <- data$neighbourhood_cleansed %in% c('Charlestown', 'Jamaica Plain')
+ggplot(data[rows, ], 
+       aes(log(closest_Groc), log(rent))) + 
+  geom_point() + geom_smooth(method = 'lm', se = FALSE) +
+  facet_wrap(~neighbourhood_cleansed) + 
+  labs(x= 'Log Distance to Closest Grocery Store', 
+       y = 'Log(Rent)')
+```
+
+Many of the variables appear to be more linearly related with the response variable when taking the log of the variable. That is, the marginally the data is very right skewed, having many amenities close, however a few listings that have a sparsity of amenities. From here, all distance variables are used on the log scale to account for this characteristic.
+
+
+With all of this into consideration, it seems apparent to include an interaction term between the log distance to grocery store and neighborhood as well as the log distance to a bike path and the neighborhood. Many of the other variables suggest less of an impact of interaction with neighborhood so they'll be modeled without an interaction term with the neighborhood.
+
+
+
+```{r, eval = FALSE, 'EDA Plots'}
+ggplot(data, aes(rooms, log(rent))) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+ggplot(data, aes(log(closest_Bar), log(rent), color = neighbourhood_cleansed)) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+ggplot(data, aes(traffic, log(rent), color = neighbourhood_cleansed)) + geom_point() 
+ggplot(data, aes(studio, log(rent), color = neighbourhood_cleansed)) + geom_boxplot()# + facet_wrap(~neighbourhood_cleansed)
+ggplot(data, aes(log(closest_Groc), log(rent), color = neighbourhood_cleansed)) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+ggplot(data, aes(log(closest_food), log(rent), color = neighbourhood_cleansed)) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+ggplot(data, aes(num_hist, log(rent), color = neighbourhood_cleansed)) + geom_point()
+ggplot(data, aes(num_land, log(rent), color = neighbourhood_cleansed)) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+ggplot(data, aes(closest_bike, log(rent), color = neighbourhood_cleansed)) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+ggplot(data, aes(num_dog, log(rent), color = neighbourhood_cleansed)) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+ggplot(data, aes(num_pSport, log(rent), color = neighbourhood_cleansed)) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+```
+
+
+# Model
+
+## Mean
+
+With the response of $\log(\text{Rent})$ being a continuous variable, we are able to model the mean of the data with a linear model. 
+
+This linear model has variables with no interaction term with the neighborhood of the listings. Namely, the log of the distance to the Boston Common, the log distance to the closest: T stop, luxurious apartment building, dog park, park, historical site, landmark, coffee shoe, restaurant, and bar all do not have an interaction term with neighborhood. Also the log of the number of rooms does not have an interaction.
+
+In order to capture the effect of the neighborhood, an interaction term is included between the neighborhood with log distance to grocery store as well as the log distance to closest bike path.
+
+Two other indicators are present in this model. They are indicators for if the listing is a studio and if it is within a mile of a sports arena.
+
+After fitting the this model, we are able to then model the residuals and capture the missing variability from this model.
+
+```{r, echo = FALSE}
+fit <- lm(data = data, 
+          log(rent) ~ log(closest_bc) + log(closest_T) + log(closest_lux) + log(closest_dog) + 
+            log(closest_Groc) * neighbourhood_cleansed + 
+            log(closest_bike)  *neighbourhood_cleansed + 
+            log(closest_park) + log(closest_hist) + log(closest_land) + log(closest_Cof) + log(closest_food) + log(closest_Bar)  + 
+            log(rooms2 + 1)  + 
+            neighbourhood_cleansed + studio + num_pSport)
+```
+
+
+## Dispersion
+
+After fitting just the linear model for the mean, it is apparent that the model does not capture all the variability of the data. Consider Figure 8 in the appendix where the squared residuals of the first model have a some sort of relationship with the average number of rooms of the surround listings. 
+
+Modeling the squared residuals from the mean model with a gamma GLM give insight to the dispersion's dependency on the covariates. A log link is used to relate the mean of the dispersion to the parameters.
+
+The predicted dispersion from this model can be used weights to refit the linear regression.
+
+```{r}
+r2 <- resid(fit, type = 'response')^2
+fit2 <- glm(data = data, 
+            r2 ~  log(closest_bc) + log(closest_T) + log(closest_lux) + log(closest_dog) + 
+            log(closest_Groc)  + 
+            log(closest_bike)  + 
+            log(closest_park) + log(closest_hist) + log(closest_land) + log(closest_Cof) + log(closest_food) + log(closest_Bar)  + 
+            log(rooms2 + 1)  + 
+            neighbourhood_cleansed + studio + num_pSport,
+            family = Gamma(link = 'log'))
+w = 1 / predict(fit2, type = 'response')
+```
+
+
+## Final Model
+
+Refitting the first linear model with new weights, this model now takes into account the varying dispersion because of our covariates. The linear models use the same covariates but only differ by the weighting of the variances.
+
+
+```{r}
+fit3 <- lm(data = data, 
+          log(rent) ~ log(closest_bc) + log(closest_T) + log(closest_lux) + log(closest_dog) + 
+            log(closest_Groc) * neighbourhood_cleansed + 
+            log(closest_bike)  * neighbourhood_cleansed + 
+            log(closest_park) + log(closest_hist) + log(closest_land) + log(closest_Cof) + log(closest_food) + log(closest_Bar)  + 
+            log(rooms2 + 1)  + 
+            neighbourhood_cleansed + studio + num_pSport, 
+          weights = w)
+```
+
+## Model Comparison
+
+The first model fit does not model the dispersion even though it is likely to have varying dispersion based off our covariates. Without modeling this dispersion, our AIC is `r round(AIC(fit))`. In comparison, weighting our linear regression with a modeled dispersion, the model has an AIC of `r round(AIC(fit3))`. 
+
+Using a lower AIC to choose between models, it suggest that modeling both the mean and dispersion is provides a better fit for the data.
+
+Similarly, in Figure 4, the residuals  of the first model in comparison to the second model where the dispersion is also modeled, we see that there no longer the a drastic increase in variance of the residuals as the fitted values increases which is promising. That is, the first model does not explain the variation of the data as well as the second model as the fitted values are larger.
+
+```{r, fig.cap='Residuals of First Model (Left) vs Second Model (Right)'}
+par(mfrow = c(1, 2))
+plot(fit, which = 3)
+plot(fit3, which = 3)
+```
+
+The second model appears to capture the variation of the data better than the first model. The regression with the modeled dispersion has an R squared of `r round(summary(fit3)$r.squared, 3)` which is an improvement from the first regression's R squared of `r round(summary(fit)$r.squared, 3)`.
+
+These few signs suggest that there has been an improvement in the fit of the data after modeling the dispersion, which better reflects our data.
+
+# Discussion
+
+## Effects of Covariates
+
+Many of the covariates effects appear to follow intuition. For instance, the final model suggests a significantly negative effect of increasing log distance from closest T stop with a 95% confidence interval for the parameter is between `r confint(fit3)[3, 1] %>% round(3)` and `r confint(fit3)[3, 2] %>% round(3)`. This suggests that as you get further away from the closest T stop, the price of a room will generally decrease. This makes sense with the T transport being used many people through the city and is clearly favorable to be near city transportation. Similarly, the model suggests that as the average number of rooms in the area increases on the log scale, the expected rent will decrease. This suggests that areas where there are living situations offer rooms will have generally have lower rent per bedroom prices.
+
+The model suggests also some insights that may not be so apparent as well. For instance, as a listing gets farther away from its closest restaurant, there is a statistically significant decrease in its rent compared  to other listings. Being closer to a restaurant will, in general, increase the value of the room being rented. On the contrary, the closer a listing is to a bar, the lower on average the rent will be per room. The data suggests that living closely to a bar will generally have a lower rent than a comparable listing further away from a bar.
+
+Consider the effect proximity a coffee shops has on the rent, our model suggest that there is no significant effect. The 95% confidence interval for the log distance to the closest coffee shop has a lower bound of `r confint(fit3)[35, 1] %>% round(3)` and upper bound `r confint(fit3)[35, 2] %>% round(3)`. This model suggest that effects of a close coffee shop is insignificant after controlling for all other variables.
+
+It is to note that the effect of the log distance to the closest coffee shop in the first model has a 95% confidence interval lower bound of `r confint(fit)[35, 1] %>% round(3)` and upper bound `r confint(fit)[35, 2] %>% round(3)`. This is contrary to what the second model says; however, our second model reflects the data better so that is used for inference.
+
+One effect that seems contrary to intuition is that the model suggests having a studio room will decrease the rent on average. The model's 95% confidence interval for this parameter is statistically negative, which seems rather odd that this effect would be the case. However, looking at the data in Figure 5, we can see that non-studio rooms with comparable average number of rooms as a studio do appear to have lower rents, making some sense of this negative parameter estimate.
+
+```{r, fig.cap='Justification of Studio Effect'}
+ggplot(data, aes(log(rooms2 + 1), log(rent))) + 
+  geom_point() +  
+  labs(x = 'Log Average Number of Rooms of 10 Closest Listings', 
+       y = 'Log(Rent)', 
+       color = 'Studio Apartment') + facet_wrap(~factor(studio, labels = c('Not Studio', 'Is Studio')))  
+```
+
+
+A table of 95% confidence intervals for all the non-interaction effects of both models are provided in the appendix.
+
+
+```{r, eval = FALSE}
+confint(fit3)[c(1:5, 32:40), ] %>% round(4)
+confint(fit)[c(1:5, 32:40), ] %>% round(4)
+```
+
+
+## Challenges
+
+While modeling this problem, there is a balance between capturing the relationships from the data while keeping a model that does not over simplify the situation. Most notably, being able to capture the effects of each listings attribute without having the added complexity that comes along with the interaction with the neighborhood of the listing. As we saw in the EDA, there potentially exists an interaction effect covariates. In order to keep a model that is rather interpretable and parsimonious many of these may be overlooked to provide that simplicity.
+
+The data had no attributes which described the interior of home which could lead to further explanation of the variability of a room's rental price. For example, year of home or condition may greatly reflect in the rental price and could improve the fit of our model.
+
+# Conclusion
+
+Figuring out what factors influence the price of a room rental throughout Boston could be explained with a linear model. However, it also seemed apparent that variability in the price also was influenced because of these factors as well. Because of that, it seemed appropriate to use a gamma GLM to model the dispersion of the data as well. After doing so, we saw improvements in our linear model ability to explain variability of the log price of a room rental through a few measures of goodness of fit. 
+
+After improving our model fit, we turned to inference from the model where we saw many conclusion that meet intuition as well as some insights about the effects of surrounding amenities and home features. 
+
+Jointly modeling the mean and dispersion of our data allows for a better fit model, leading to better inference about our parameters, and provides a understanding behind the amenities that drive room prices in Boston.
+
+\newpage
+
+# Appendix
+
+## EDA
+
+Many covariates are linear with the rent on a log scale. Also, regardless of the neighborhood, the relationship is fairly similar. In the Figure 6 example, increasing the log of the average number of rooms in the area generally decreases the price of the room in the same manner regardless of location in the city.
+
+```{r, fig.cap='Example of No Effect of Neighborhood'}
+rows <- data$neighbourhood_cleansed %in% c('Dorchester', 'Fenway', 'Brighton')
+ggplot(data[rows, ], 
+       aes(log(rooms2 + 1), 
+           log(rent))) + 
+  geom_point() + geom_smooth(method = 'lm', se = FALSE) +
+  facet_wrap(~neighbourhood_cleansed) + 
+  labs(x = 'Log Average Number of Rooms of 10 Closest Listings', 
+       y = 'Log(Rent)')
+```
+
+
+Another case in Figure 7 where the relationship that a response has with a covariate depends upon the neighborhood. That is, in Brighton, there does not seem to be much of a relationship between the closest bike path and the rent. However, Chinatown shows a negative relationship, and Fenway appears to be some other relationship that differs from the both of them.
+
+```{r, fig.cap='Example of Neighborhood Effect with the Covariate'}
+rows <- data$neighbourhood_cleansed %in% c('Chinatown', 'Fenway', 'Brighton')
+ggplot(data[rows, ], 
+       aes(log(closest_bike), log(rent))) + 
+  geom_point() + geom_smooth(method = 'lm', se = FALSE) +
+  facet_wrap(~neighbourhood_cleansed) + 
+  labs(x = 'Log Closest Bike Path in Miles', 
+       y = 'Log(Rent)')
+```
+
+## Dispersion
+
+
+After fitting the model on just the mean of the data, it is apparent that the dispersion depend upon the covariates as well. Figure 8 suggests that the dispersion is also dependent upon the number of rooms.
+
+```{r, fig.cap='Modeling the Dispersion after First Model'}
+ggplot(data, aes(log(rooms2 + 1), r2)) + geom_point() + 
+  labs(x = 'Log Average Number of Rooms of 10 Closest Listings', 
+       y = 'Squared Residuals of Mean Model')
+```
+
+
+```{r, eval = FALSE, 'Dispersion Plots'}
+
+ggplot(data, aes(log(rooms2 + 1), r2)) + geom_point() 
+ggplot(data, aes(num_Bar, r2, color = neighbourhood_cleansed)) + geom_point() 
+ggplot(data, aes(traffic, r2, color = neighbourhood_cleansed)) + geom_point() 
+ggplot(data, aes(studio, r2, color = neighbourhood_cleansed)) + geom_boxplot() 
+ggplot(data, aes(num_Groc, r2, color = neighbourhood_cleansed)) + geom_point() 
+ggplot(data, aes(num_food, r2, color = neighbourhood_cleansed)) + geom_point() 
+ggplot(data, aes(num_hist, log(rent), color = neighbourhood_cleansed)) + geom_point()
+ggplot(data, aes(num_land, log(rent), color = neighbourhood_cleansed)) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+ggplot(data, aes(closest_bike, log(rent), color = neighbourhood_cleansed)) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+ggplot(data, aes(num_dog, log(rent), color = neighbourhood_cleansed)) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+ggplot(data, aes(num_pSport, log(rent), color = neighbourhood_cleansed)) + geom_point() + facet_wrap(~neighbourhood_cleansed)
+```
+
+
+## Effect of Covariates
+
+Below are the 95% confidence intervals for the final model's parameter estimates that are do not include an interaction.
+
+The intercept, distance to closest park, closest historical location, closest Bar, and is within half a mile of an arena are all statistically positive. Similarly, the distance to the Boston Common, closest T stop, luxurious apartment complex, restaurant, log number of rooms, and the studio indicator are all statistically negative.
+
+```{r}
+confint(fit3)[c(1:5, 32:40), ] %>% round(4)
+```
+
+Similarly, the 95% confidence intervals from the first model that did not model dispersion for comparison. Because the fit of this model is not as good as the final model, we do not use it for inference.
+
+```{r}
+confint(fit)[c(1:5, 32:40), ] %>% round(4)
+```
+
+```{r, eval = FALSE}
+# Mixed Effects Model
+fit <- lmer(data = data, 
+          log(rent) ~ log(closest_bc) + log(closest_T) + log(closest_lux) + log(closest_dog) + 
+            log(closest_park) + log(closest_hist) + log(closest_land) + log(closest_Cof) + log(closest_food) + log(closest_Bar)  + 
+            log(rooms2 + 1)  + studio + num_pSport + (1 | neighbourhood_cleansed))
+r <- resid(fit, type = 'response')^2
+fit2 <- glm(data = data, r ~ neighbourhood_cleansed + rooms, family = Gamma(link = 'log'))
+w <- 1 / predict(fit2, type = 'response')
+fit3 <- lmer(data = data, 
+          log(rent) ~ num_T + num_dog + num_lux + num_Cof + poly(num_hist, degree = 2, raw = TRUE) +
+            num_food+ num_Bar + num_land +
+            closest_bike  + factor(num_bc) + factor(num_pSport) + (1 + closest_bike + rooms + I(rooms^2) + studio + traffic + num_Groc | neighbourhood_cleansed), 
+          weights = w)
+
+# Compare Models
+AIC(fit); AIC(fit3)
+```
+
+ 
+ 
